@@ -1,0 +1,79 @@
+name: Permute swarm (banked near-misses)
+
+# Runs tools/permute.py over upstream's banked attempts, sharded across Windows
+# runners with native MSVC 7.1. Read-only with respect to upstream: wins are
+# uploaded as artifacts and landed locally through the normal hooks.
+
+on:
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: 'Number of shards (matrix size, max 20)'
+        default: '20'
+      minutes:
+        description: 'Minutes of random permutation per body'
+        default: '6'
+      min_score:
+        description: 'Minimum banked score to include'
+        default: '0.8'
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - id: m
+        run: |
+          n=${{ inputs.shards }}
+          echo "matrix=$(python3 -c "import json;print(json.dumps(list(range($n))))")" >> "$GITHUB_OUTPUT"
+
+  permute:
+    needs: plan
+    runs-on: windows-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Open-BFME/Open-BFME-2
+          ref: master
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r reference/open-bfme-1/tools/requirements.txt
+      - name: Permute this shard
+        shell: python
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ inputs.shards }}
+          MINUTES: ${{ inputs.minutes }}
+          MIN_SCORE: ${{ inputs.min_score }}
+        run: |
+          import os, subprocess, sys
+          sys.path.insert(0, 'tools')
+          import permute
+          items = permute.queue(float(os.environ['MIN_SCORE']))
+          k, n = int(os.environ['SHARD']), int(os.environ['SHARDS'])
+          rvas = [rva for _, _, rva, _ in items][k::n]
+          print(f'shard {k}/{n}: {len(rvas)} bodies', flush=True)
+          if rvas:
+              subprocess.run([sys.executable, 'tools/permute.py', *rvas,
+                              '--minutes', os.environ['MINUTES'], '--jobs', '4'])
+      - name: Upload wins
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: permute-shard-${{ matrix.shard }}
+          path: |
+            build/permute/*/win.cpp
+            build/permute/*/*.json
+          if-no-files-found: ignore
+          retention-days: 7
